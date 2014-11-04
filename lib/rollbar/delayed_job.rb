@@ -13,6 +13,7 @@ module Rollbar
             ::Rollbar.report_exception(e, data)
             # based on http://bit.ly/VGdfVI
           end
+          raise e
         end
       end
     end
