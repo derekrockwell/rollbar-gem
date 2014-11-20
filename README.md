@@ -1,4 +1,4 @@
-# Rollbar notifier for Ruby [![Build Status](https://api.travis-ci.org/rollbar/rollbar-gem.svg?branch=v1.2.7)](https://travis-ci.org/rollbar/rollbar-gem/branches)
+# Rollbar notifier for Ruby [![Build Status](https://api.travis-ci.org/rollbar/rollbar-gem.svg?branch=v1.2.10)](https://travis-ci.org/rollbar/rollbar-gem/branches)
 
 <!-- RemoveNext -->
 Ruby gem for reporting exceptions, errors, and log messages to [Rollbar](https://rollbar.com).
@@ -9,7 +9,7 @@ Ruby gem for reporting exceptions, errors, and log messages to [Rollbar](https:/
 
 Add this line to your application's Gemfile:
 
-    gem 'rollbar', '~> 1.2.7'
+    gem 'rollbar', '~> 1.2.10'
 
 And then execute:
 
@@ -51,7 +51,7 @@ $ heroku config:add ROLLBAR_ACCESS_TOKEN=POST_SERVER_ITEM_ACCESS_TOKEN
 
 That's all you need to use Rollbar with Rails.
 
-### If not using Rails
+### If using Rack
 
 Be sure to initialize Rollbar with your access token somewhere during startup:
 
@@ -66,6 +66,28 @@ end
 
 <!-- RemoveNextIfProject -->
 Be sure to replace ```POST_SERVER_ITEM_ACCESS_TOKEN``` with your project's ```post_server_item``` access token, which you can find in the Rollbar.com interface.
+
+This monkey patches `Rack::Builder` to work with Rollbar automatically.
+
+For more control, disable the monkey patch in the rollbar configuration:
+
+```ruby
+Rollbar.configure do |config|
+  config.disable_monkey_patch = true
+  # other configuration settings
+  # ...
+end
+```
+
+Then mount the middleware in your app, like:
+
+```ruby
+class MyApp < Sinatra::Base
+  use Rollbar::Middleware::Sinatra
+  # other middleware/etc
+  # ...
+end
+```
 
 ## Test your installation
 
@@ -498,6 +520,21 @@ Some users have reported problems with Zeus when ```rake``` was not explicitly i
 ## Backwards Compatibility
 
 You can find upgrading notes in [UPGRADING.md](UPGRADING.md).
+
+## Issues
+
+We've received some issues from users having problems when they use [Oj](https://github.com/ohler55/oj) as the JSON serialization library with [MultiJson](https://github.com/intridea/multi_json). To avoid these problems, we recommend upgrading to Oj version 2.11.0:
+
+```ruby
+gem 'oj', '~> 2.11.0'
+```
+
+If you are using Oj but cannot upgrade, you can work around this with:
+
+```ruby
+require 'json'
+MultiJson.use(:json_common)
+```
 
 
 ## Help / Support

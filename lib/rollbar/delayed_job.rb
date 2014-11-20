@@ -10,8 +10,7 @@ module Rollbar
         rescue Exception => e
           if job.attempts >= ::Rollbar.configuration.dj_threshold
             data = ::Rollbar.configuration.report_dj_data ? job : nil
-            ::Rollbar.report_exception(e, data)
-            # based on http://bit.ly/VGdfVI
+            ::Rollbar.scope(:request => data).error(e)
           end
           raise e
         end

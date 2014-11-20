@@ -23,7 +23,24 @@ describe Rollbar do
         end
       end
 
-  let(:configuration) { Rollbar.configuration }
+      let(:configuration) { Rollbar.configuration }
+
+      context 'executing a Thread before Rollbar is configured', :skip_dummy_rollbar => true do
+        before do
+          Rollbar.reset_notifier!
+          Rollbar.unconfigure
+
+          Thread.new {}
+
+          Rollbar.configure do |config|
+            config.access_token = 'my-access-token'
+          end
+        end
+
+        it 'sets correct configuration for Rollbar.notifier' do
+          expect(Rollbar.notifier.configuration.enabled).to be_truthy
+        end
+      end
 
       it 'should report a simple message' do
         expect(notifier).to receive(:report).with('error', 'test message', nil, nil)
@@ -283,7 +300,7 @@ describe Rollbar do
         end
 
         it 'should have the correct server keys' do
-          payload['data'][:server].keys.should match_array([:host, :root])
+          payload['data'][:server].keys.should match_array([:host, :root, :pid])
         end
 
         it 'should have the correct level and message body' do
@@ -303,6 +320,8 @@ describe Rollbar do
       end
 
       it 'should overwrite existing keys from payload_options' do
+        reconfigure_notifier
+
         payload_options = {
           :notifier => 'bad notifier',
           :server => { :host => 'new host', :new_server_key => 'value' }
@@ -565,18 +584,36 @@ describe Rollbar do
             chain[1][:exception][:message].should match(/the cause/)
           end
 
-          context 'using ruby <= 2.1' do
-            next if Exception.instance_methods.include?(:cause)
+          context 'with cyclic nested exceptions' do
+            let(:exception1) { Exception.new('exception1') }
+            let(:exception2) { Exception.new('exception2') }
 
-            it 'sends only the last exception in the trace attribute' do
-              body = notifier.send(:build_payload_body_exception, message, rescued_exception, extra)
-
-              body[:trace].should be_kind_of(Hash)
-              body[:trace_chain].should be_nil
-
-              body[:trace][:exception][:class].should match(/StandardError/)
-              body[:trace][:exception][:message].should match(/the error/)
+            before do
+              allow(exception1).to receive(:cause).and_return(exception2)
+              allow(exception2).to receive(:cause).and_return(exception1)
             end
+
+            it 'doesnt loop for ever' do
+              body = notifier.send(:build_payload_body_exception, message, exception1, extra)
+              chain = body[:trace_chain]
+
+              expect(chain[0][:exception][:message]).to be_eql('exception1')
+              expect(chain[1][:exception][:message]).to be_eql('exception2')
+            end
+          end
+        end
+
+        context 'using ruby <= 2.1' do
+          next if Exception.instance_methods.include?(:cause)
+
+          it 'sends only the last exception in the trace attribute' do
+            body = notifier.send(:build_payload_body_exception, message, rescued_exception, extra)
+
+            body[:trace].should be_kind_of(Hash)
+            body[:trace_chain].should be_nil
+
+            body[:trace][:exception][:class].should match(/StandardError/)
+            body[:trace][:exception][:message].should match(/the error/)
           end
         end
       end
@@ -909,7 +946,7 @@ describe Rollbar do
     it 'should report simple messages' do
       logger_mock.should_receive(:info).with('[Rollbar] Scheduling payload')
       logger_mock.should_receive(:info).with('[Rollbar] Success')
-      Rollbar.report_message("Test message")
+      Rollbar.error('Test message')
     end
 
     it 'should not report anything when disabled' do
@@ -918,7 +955,7 @@ describe Rollbar do
         config.enabled = false
       end
 
-      Rollbar.report_message("Test message that should be ignored")
+      Rollbar.error('Test message that should be ignored')
 
       Rollbar.configure do |config|
         config.enabled = true
@@ -927,8 +964,8 @@ describe Rollbar do
 
     it 'should report messages with extra data' do
       logger_mock.should_receive(:info).with('[Rollbar] Success')
-      Rollbar.report_message("Test message with extra data", 'debug', :foo => "bar",
-                               :hash => { :a => 123, :b => "xyz" })
+      Rollbar.debug('Test message with extra data', 'debug', :foo => "bar",
+                                                             :hash => { :a => 123, :b => "xyz" })
     end
 
     # END Backwards
@@ -1127,7 +1164,7 @@ describe Rollbar do
       it 'sends a payload generated as String, not as a Hash' do
         logger_mock.should_receive(:info).with('[Rollbar] Success')
 
-        Rollbar.report_exception(exception)
+        Rollbar.error(exception)
       end
 
       context 'with async failover handlers' do
@@ -1150,7 +1187,7 @@ describe Rollbar do
           it 'doesnt call any failover handler' do
             expect(handler).not_to receive(:call)
 
-            Rollbar.report_exception(exception)
+            Rollbar.error(exception)
           end
         end
 

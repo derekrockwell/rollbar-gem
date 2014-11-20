@@ -19,7 +19,6 @@ require 'rollbar/util'
 require 'rollbar/railtie' if defined?(Rails)
 require 'rollbar/delay/girl_friday'
 require 'rollbar/delay/thread'
-require 'rollbar/core_ext/thread'
 
 unless ''.respond_to? :encode
   require 'iconv'
@@ -349,9 +348,11 @@ module Rollbar
 
     def trace_chain(exception)
       traces = [trace_data(exception)]
+      visited = [exception]
 
-      while exception.respond_to?(:cause) && (cause = exception.cause)
+      while exception.respond_to?(:cause) && (cause = exception.cause) && !visited.include?(cause)
         traces << trace_data(cause)
+        visited << cause
         exception = cause
       end
 
@@ -371,6 +372,7 @@ module Rollbar
       }
       data[:root] = configuration.root.to_s if configuration.root
       data[:branch] = configuration.branch if configuration.branch
+      data[:pid] = Process.pid
 
       data
     end
@@ -662,6 +664,9 @@ module Rollbar
       yield(configuration)
 
       require_hooks
+      # This monkey patch is always needed in order
+      # to use Rollbar.scoped
+      require 'rollbar/core_ext/thread'
     end
 
     def reconfigure
@@ -679,6 +684,7 @@ module Rollbar
     end
 
     def require_hooks
+      return if configuration.disable_monkey_patch
       wrap_delayed_worker
 
       require 'rollbar/sidekiq' if defined?(Sidekiq)
