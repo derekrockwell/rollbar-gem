@@ -99,6 +99,8 @@ module Rollbar
 
     def rollbar_user_ip(env)
       (env['action_dispatch.remote_ip'] || env['HTTP_X_REAL_IP'] || env['HTTP_X_FORWARDED_FOR'] || env['REMOTE_ADDR']).to_s
+    rescue
+      nil
     end
 
     def rollbar_get_params(rack_req)
@@ -119,7 +121,7 @@ module Rollbar
       return {} unless correct_method
       return {} unless rack_req.env['CONTENT_TYPE'] =~ %r{application/json}i
 
-      MultiJson.decode(rack_req.body.read)
+      Rollbar::JSON.load(rack_req.body.read)
     rescue
       {}
     ensure

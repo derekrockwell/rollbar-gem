@@ -31,7 +31,7 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
   let(:logger_mock) { double('logger').as_null_object }
 
   before do
-    Rollbar.reconfigure do |config|
+    Rollbar.configure do |config|
       config.logger = logger_mock
       config.framework = 'Sinatra'
     end
@@ -42,7 +42,7 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
   end
 
   let(:expected_report_args) do
-    [uncaught_level, exception]
+    [uncaught_level, exception, { :use_exception_level_filters => true }]
   end
 
   describe '#call' do
@@ -161,6 +161,29 @@ describe Rollbar::Middleware::Sinatra, :reconfigure_notifier => true do
       id2 = Rollbar.notifier.object_id
 
       expect(id1).not_to be_eql(id2)
+    end
+
+    context 'with person data' do
+      let(:exception) { kind_of(SinatraDummy::DummyError) }
+      let(:person_data) do
+        { 'email' => 'person@example.com' }
+      end
+
+      it 'includes person data from env' do
+        expect do
+          get '/foo', {}, 'rollbar.person_data' => person_data
+        end.to raise_error(exception)
+
+        expect(Rollbar.last_report[:person]).to be_eql(person_data)
+      end
+
+      it 'includes empty person data when not in env' do
+        expect do
+          get '/foo'
+        end.to raise_error(exception)
+
+        expect(Rollbar.last_report[:person]).to be_eql({})
+      end
     end
   end
 end

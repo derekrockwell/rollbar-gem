@@ -2,7 +2,6 @@ require 'net/https'
 require 'socket'
 require 'thread'
 require 'uri'
-require 'multi_json'
 require 'forwardable'
 
 begin
@@ -11,31 +10,31 @@ rescue LoadError
 end
 
 require 'rollbar/version'
+require 'rollbar/json'
 require 'rollbar/configuration'
+require 'rollbar/encoding'
 require 'rollbar/logger_proxy'
 require 'rollbar/exception_reporter'
-require 'rollbar/active_record_extension' if defined?(ActiveRecord)
 require 'rollbar/util'
-require 'rollbar/railtie' if defined?(Rails)
+require 'rollbar/railtie' if defined?(Rails::VERSION)
 require 'rollbar/delay/girl_friday'
 require 'rollbar/delay/thread'
-
-unless ''.respond_to? :encode
-  require 'iconv'
-end
+require 'rollbar/truncation'
 
 module Rollbar
-  MAX_PAYLOAD_SIZE = 128 * 1024 #128kb
   ATTACHMENT_CLASSES = %w[
     ActionDispatch::Http::UploadedFile
     Rack::Multipart::UploadedFile
   ].freeze
   PUBLIC_NOTIFIER_METHODS = %w(debug info warn warning error critical log logger
-                               process_payload scope send_failsafe log_info log_debug
+                               process_payload process_payload_safely scope send_failsafe log_info log_debug
                                log_warning log_error silenced)
 
   class Notifier
     attr_accessor :configuration
+    attr_accessor :last_report
+
+    @file_semaphore = Mutex.new
 
     def initialize(parent_notifier = nil, payload_options = nil)
       if parent_notifier
@@ -48,11 +47,6 @@ module Rollbar
         @configuration = ::Rollbar::Configuration.new
       end
     end
-
-    attr_writer :configuration
-    attr_accessor :last_report
-
-    @file_semaphore = Mutex.new
 
     # Similar to configure below, but used only internally within the gem
     # to configure it without initializing any of the third party hooks
@@ -71,8 +65,20 @@ module Rollbar
       self.class.new(self, options)
     end
 
-    def configure
-      yield(configuration)
+    def scope!(options = {})
+      Rollbar::Util.deep_merge(@configuration.payload_options, options)
+      self
+    end
+
+    # Returns a new notifier with same configuration options
+    # but it sets Configuration#safely to true.
+    # We are using this flag to avoid having inifite loops
+    # when evaluating some custom user methods.
+    def safely
+      new_notifier = scope
+      new_notifier.configuration.safely = true
+
+      new_notifier
     end
 
     # Turns off reporting for the given block.
@@ -125,10 +131,14 @@ module Rollbar
         end
       end
 
-      return 'ignored' if ignored?(exception)
+      use_exception_level_filters = extra && extra.delete(:use_exception_level_filters) == true
 
-      exception_level = filtered_level(exception)
-      level = exception_level if exception_level
+      return 'ignored' if ignored?(exception, use_exception_level_filters)
+
+      if use_exception_level_filters
+        exception_level = filtered_level(exception)
+        level = exception_level if exception_level
+      end
 
       begin
         report(level, message, exception, extra)
@@ -180,13 +190,31 @@ module Rollbar
       else
         send_payload(payload)
       end
+    rescue => e
+      log_error("[Rollbar] Error processing the payload: #{e.class}, #{e.message}. Payload: #{payload.inspect}")
+      raise e
+    end
+
+    def process_payload_safely(payload)
+      process_payload(payload)
+    rescue => e
+      report_internal_error(e)
+    end
+
+    def custom_data
+      data = configuration.custom_data_method.call
+      Rollbar::Util.deep_copy(data)
+    rescue => e
+      return {} if configuration.safely?
+
+      report_custom_data_error(e)
     end
 
     private
 
-    def ignored?(exception)
+    def ignored?(exception, use_exception_level_filters = false)
       return false unless exception
-      return true if filtered_level(exception) == 'ignore'
+      return true if use_exception_level_filters && filtered_level(exception) == 'ignore'
       return true if exception.instance_variable_get(:@_rollbar_do_not_report)
 
       false
@@ -215,9 +243,6 @@ module Rollbar
       if data[:person]
         person_id = data[:person][configuration.person_id_method.to_sym]
         return 'ignored' if configuration.ignored_person_ids.include?(person_id)
-
-        is_proc = data[:person].respond_to?(:call)
-        data[:person] = data[:person].call if is_proc
       end
 
       schedule_payload(payload)
@@ -283,6 +308,14 @@ module Rollbar
 
       Rollbar::Util.deep_merge(data, configuration.payload_options)
 
+      data[:person] = data[:person].call if data[:person].respond_to?(:call)
+      data[:request] = data[:request].call if data[:request].respond_to?(:call)
+      data[:context] = data[:context].call if data[:context].respond_to?(:call)
+
+      # Our API doesn't allow null context values, so just delete
+      # the key if value is nil.
+      data.delete(:context) unless data[:context]
+
       payload = {
         'access_token' => configuration.access_token,
         'data' => data
@@ -294,16 +327,27 @@ module Rollbar
     end
 
     def build_payload_body(message, exception, extra)
-      unless configuration.custom_data_method.nil?
-        custom = Rollbar::Util.deep_copy(configuration.custom_data_method.call)
-        extra = Rollbar::Util.deep_merge(custom, extra || {})
-      end
+      extra = Rollbar::Util.deep_merge(custom_data, extra || {}) if custom_data_method?
 
       if exception
         build_payload_body_exception(message, exception, extra)
       else
         build_payload_body_message(message, extra)
       end
+    end
+
+    def custom_data_method?
+      !!configuration.custom_data_method
+    end
+
+    def report_custom_data_error(e)
+      data = safely.error(e)
+
+      return {} unless data[:uuid]
+
+      uuid_url = uuid_rollbar_url(data)
+
+      { :_error_in_custom_data_method => uuid_url }
     end
 
     def build_payload_body_exception(message, exception, extra)
@@ -320,22 +364,19 @@ module Rollbar
     end
 
     def trace_data(exception)
-      # parse backtrace
-      if exception.backtrace.respond_to?( :map )
-        frames = exception.backtrace.map { |frame|
-          # parse the line
-          match = frame.match(/(.*):(\d+)(?::in `([^']+)')?/)
-          if match
-            { :filename => match[1], :lineno => match[2].to_i, :method => match[3] }
-          else
-            { :filename => "<unknown>", :lineno => 0, :method => frame }
-          end
-        }
-        # reverse so that the order is as rollbar expects
-        frames.reverse!
-      else
-        frames = []
+      frames = exception_backtrace(exception).map do |frame|
+        # parse the line
+        match = frame.match(/(.*):(\d+)(?::in `([^']+)')?/)
+
+        if match
+          { :filename => match[1], :lineno => match[2].to_i, :method => match[3] }
+        else
+          { :filename => "<unknown>", :lineno => 0, :method => frame }
+        end
       end
+
+        # reverse so that the order is as rollbar expects
+      frames.reverse!
 
       {
         :frames => frames,
@@ -344,6 +385,28 @@ module Rollbar
           :message => exception.message
         }
       }
+    end
+
+    # Returns the backtrace to be sent to our API. There are 3 options:
+    #
+    # 1. The exception received has a backtrace, then that backtrace is returned.
+    # 2. configuration.populate_empty_backtraces is disabled, we return [] here
+    # 3. The user has configuration.populate_empty_backtraces is enabled, then:
+    #
+    # We want to send the caller as backtrace, but the first lines of that array
+    # are those from the user's Rollbar.error line until this method. We want
+    # to remove those lines.
+    def exception_backtrace(exception)
+      return exception.backtrace if exception.backtrace.respond_to?( :map )
+      return [] unless configuration.populate_empty_backtraces
+
+      caller_backtrace = caller
+      caller_backtrace.shift while caller_backtrace[0].include?(rollbar_lib_gem_dir)
+      caller_backtrace
+    end
+
+    def rollbar_lib_gem_dir
+      Gem::Specification.find_by_name('rollbar').gem_dir + '/lib'
     end
 
     def trace_chain(exception)
@@ -378,21 +441,7 @@ module Rollbar
     end
 
     def enforce_valid_utf8(payload)
-      normalizer = lambda do |object|
-        is_symbol = object.is_a?(Symbol)
-
-        return object unless object == object.to_s || is_symbol
-
-        value = object.to_s
-
-        if value.respond_to? :encode
-          encoded_value = value.encode('UTF-8', 'binary', :invalid => :replace, :undef => :replace, :replace => '')
-        else
-          encoded_value = ::Iconv.conv('UTF-8//IGNORE', 'UTF-8', value)
-        end
-
-        is_symbol ? encoded_value.to_sym : encoded_value
-      end
+      normalizer = lambda { |object| Encoding.encode(object) }
 
       Rollbar::Util.iterate_and_update(payload, normalizer)
     end
@@ -412,26 +461,6 @@ module Rollbar
     end
 
     ## Delivery functions
-
-    def schedule_payload(payload)
-      log_info '[Rollbar] Scheduling payload'
-
-      if configuration.use_async
-        unless configuration.async_handler
-          configuration.async_handler = method(:default_async_handler)
-        end
-
-        if configuration.write_to_file
-          unless @file_semaphore
-            @file_semaphore = Mutex.new
-          end
-        end
-
-        configuration.async_handler.call(payload)
-      else
-        process_payload(payload)
-      end
-    end
 
     def send_payload_using_eventmachine(payload)
       body = dump_payload(payload)
@@ -455,7 +484,7 @@ module Rollbar
 
     def send_payload(payload)
       log_info '[Rollbar] Sending payload'
-      payload = MultiJson.load(payload) if payload.is_a?(String)
+      payload = Rollbar::JSON.load(payload) if payload.is_a?(String)
 
       if configuration.use_eventmachine
         send_payload_using_eventmachine(payload)
@@ -499,12 +528,14 @@ module Rollbar
     def do_write_payload(payload)
       log_info '[Rollbar] Writing payload to file'
 
+      body = dump_payload(payload)
+
       begin
         unless @file
           @file = File.open(configuration.filepath, "a")
         end
 
-        @file.puts payload
+        @file.puts(body)
         @file.flush
         log_info "[Rollbar] Success"
       rescue IOError => e
@@ -593,37 +624,24 @@ module Rollbar
         rescue
           next unless handler == failover_handlers.last
 
-          log_error "[Rollbar] All failover handlers failed while processing payload: #{MultiJson.dump(payload)}"
+          log_error "[Rollbar] All failover handlers failed while processing payload: #{Rollbar::JSON.dump(payload)}"
         end
       end
     end
 
     def dump_payload(payload)
-      result = MultiJson.dump(payload)
+      # Ensure all keys are strings since we can receive the payload inline or
+      # from an async handler job, which can be serialized.
+      stringified_payload = Rollbar::Util::Hash.deep_stringify_keys(payload)
+      result = Truncation.truncate(stringified_payload)
+      return result unless Truncation.truncate?(result)
 
-      # Try to truncate strings in the payload a few times if the payload is too big
-      original_size = result.bytesize
-      if original_size > MAX_PAYLOAD_SIZE
-        thresholds = [1024, 512, 256]
-        thresholds.each_with_index do |threshold, i|
-          new_payload = payload.clone
+      original_size = Rollbar::JSON.dump(payload).bytesize
+      final_size = result.bytesize
+      send_failsafe("Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Final size: #{final_size}", nil)
+      log_error "[Rollbar] Payload too large to be sent: #{Rollbar::JSON.dump(payload)}"
 
-          truncate_payload(new_payload, threshold)
-
-          result = MultiJson.dump(new_payload)
-
-          if result.bytesize <= MAX_PAYLOAD_SIZE
-            break
-          elsif i == thresholds.length - 1
-            final_size = result.bytesize
-            send_failsafe("Could not send payload due to it being too large after truncating attempts. Original size: #{original_size} Final size: #{final_size}", nil)
-            log_error "[Rollbar] Payload too large to be sent: #{MultiJson.dump(payload)}"
-            return
-          end
-        end
-      end
-
-      result
+      nil
     end
 
     ## Logging
@@ -637,8 +655,13 @@ module Rollbar
 
     def log_instance_link(data)
       if data[:uuid]
-        log_info "[Rollbar] Details: #{configuration.web_base}/instance/uuid?uuid=#{data[:uuid]} (only available if report was successful)"
+        uuid_url = uuid_rollbar_url(data)
+        log_info "[Rollbar] Details: #{uuid_url} (only available if report was successful)"
       end
+    end
+
+    def uuid_rollbar_url(data)
+      "#{configuration.web_base}/instance/uuid?uuid=#{data[:uuid]}"
     end
 
     def logger
@@ -663,16 +686,23 @@ module Rollbar
 
       yield(configuration)
 
+      configure_json_backend
       require_hooks
-      # This monkey patch is always needed in order
-      # to use Rollbar.scoped
-      require 'rollbar/core_ext/thread'
+      require_core_extensions
+
+      reset_notifier!
+    end
+
+    def configure_json_backend
+      Rollbar::JSON.setup
     end
 
     def reconfigure
       @configuration = Configuration.new
       @configuration.enabled = true
       yield(configuration)
+
+      reset_notifier!
     end
 
     def unconfigure
@@ -683,15 +713,31 @@ module Rollbar
       @configuration ||= Configuration.new
     end
 
+    def safely?
+      configuration.safely?
+    end
+
     def require_hooks
       return if configuration.disable_monkey_patch
       wrap_delayed_worker
 
+      require 'rollbar/active_record_extension' if defined?(ActiveRecord)
       require 'rollbar/sidekiq' if defined?(Sidekiq)
       require 'rollbar/goalie' if defined?(Goalie)
       require 'rollbar/rack' if defined?(Rack)
       require 'rollbar/rake' if defined?(Rake)
       require 'rollbar/better_errors' if defined?(BetterErrors)
+    end
+
+    def require_core_extensions
+      # This monkey patch is always needed in order
+      # to use Rollbar.scoped
+      require 'rollbar/core_ext/thread'
+
+      return if configuration.disable_core_monkey_patch
+
+      # Needed to avoid active_support bug serializing JSONs.
+      require 'rollbar/core_ext/basic_socket'
     end
 
     def wrap_delayed_worker
@@ -746,6 +792,10 @@ module Rollbar
       self.notifier = old_notifier
     end
 
+    def scope!(options = {})
+      notifier.scope!(options)
+    end
+
     # Backwards compatibility methods
 
     def report_exception(exception, request_data = nil, person_data = nil, level = 'error')
@@ -756,7 +806,7 @@ module Rollbar
       scope[:person] = person_data if person_data
 
       Rollbar.scoped(scope) do
-        Rollbar.notifier.log(level, exception)
+        Rollbar.notifier.log(level, exception, :use_exception_level_filters => true)
       end
     end
 

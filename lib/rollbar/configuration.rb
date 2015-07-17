@@ -11,6 +11,7 @@ module Rollbar
     attr_accessor :delayed_job_enabled
     attr_accessor :default_logger
     attr_accessor :disable_monkey_patch
+    attr_accessor :disable_core_monkey_patch
     attr_accessor :dj_threshold
     attr_accessor :enabled
     attr_accessor :endpoint
@@ -26,9 +27,11 @@ module Rollbar
     attr_accessor :person_id_method
     attr_accessor :person_username_method
     attr_accessor :person_email_method
+    attr_accessor :populate_empty_backtraces
     attr_accessor :report_dj_data
     attr_accessor :request_timeout
     attr_accessor :root
+    attr_accessor :safely
     attr_accessor :scrub_fields
     attr_accessor :uncaught_exception_level
     attr_accessor :scrub_headers
@@ -38,6 +41,8 @@ module Rollbar
     attr_accessor :write_to_file
 
     attr_reader :project_gem_paths
+
+    alias_method :safely?, :safely
 
     DEFAULT_ENDPOINT = 'https://api.rollbar.com/api/1/item/'
     DEFAULT_WEB_BASE = 'https://rollbar.com'
@@ -49,6 +54,7 @@ module Rollbar
       @default_logger = lambda { Logger.new(STDERR) }
       @delayed_job_enabled = true
       @disable_monkey_patch = false
+      @disable_core_monkey_patch = false
       @dj_threshold = 0
       @enabled = nil  # set to true when configure is called
       @endpoint = DEFAULT_ENDPOINT
@@ -67,12 +73,14 @@ module Rollbar
       @person_username_method = 'username'
       @person_email_method = 'email'
       @project_gems = []
+      @populate_empty_backtraces = false
       @report_dj_data = true
       @request_timeout = 3
       @scrub_fields = [:passwd, :password, :password_confirmation, :secret,
                        :confirm_password, :password_confirmation, :secret_token]
       @uncaught_exception_level = 'error'
       @scrub_headers = ['Authorization']
+      @safely = false
       @use_async = false
       @use_eventmachine = false
       @web_base = DEFAULT_WEB_BASE

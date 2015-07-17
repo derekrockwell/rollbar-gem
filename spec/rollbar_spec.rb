@@ -1,9 +1,12 @@
-# encoding: UTF-8
+# encoding: utf-8
 
 require 'logger'
 require 'socket'
 require 'spec_helper'
 require 'girl_friday'
+require 'redis'
+require 'active_support/core_ext/object'
+require 'active_support/json/encoding'
 
 begin
   require 'sucker_punch'
@@ -13,6 +16,27 @@ end
 
 describe Rollbar do
   let(:notifier) { Rollbar.notifier }
+  before do
+    Rollbar.unconfigure
+    configure
+  end
+
+  context 'when notifier has been used before configure it' do
+    before do
+      Rollbar.unconfigure
+      Rollbar.reset_notifier!
+    end
+
+    it 'is finally reset' do
+      Rollbar.log_debug('Testing notifier')
+      expect(Rollbar.error('error message')).to be_eql('disabled')
+
+      reconfigure_notifier
+
+      expect(Rollbar.error('error message')).not_to be_eql('disabled')
+    end
+  end
+
   context 'Notifier' do
     context 'log' do
       let(:exception) do
@@ -270,11 +294,6 @@ describe Rollbar do
     end
 
     context 'build_payload' do
-      after(:each) do
-        Rollbar.unconfigure
-        configure
-      end
-
       context 'a basic payload' do
         let(:extra_data) { {:key => 'value', :hash => {:inner_key => 'inner_value'}} }
         let(:payload) { notifier.send(:build_payload, 'info', 'message', nil, extra_data) }
@@ -392,6 +411,32 @@ describe Rollbar do
         payload['data'][:body][:message][:extra][:f].should == 'f'
       end
 
+      context 'with custom_data_method crashing' do
+        next unless defined?(SecureRandom) and SecureRandom.respond_to?(:uuid)
+
+        let(:crashing_exception) { StandardError.new }
+        let(:custom_method) { proc { raise crashing_exception } }
+        let(:extra) { { :foo => :bar } }
+        let(:custom_data_report) do
+          { :_error_in_custom_data_method => SecureRandom.uuid }
+        end
+        let(:expected_extra) { extra.merge(custom_data_report) }
+
+        before do
+          notifier.configure do |config|
+            config.custom_data_method = custom_method
+          end
+
+          expect(notifier).to receive(:report_custom_data_error).once.and_return(custom_data_report)
+        end
+
+        it 'doesnt crash the report' do
+          payload = notifier.send(:build_payload, 'info', 'message', nil, extra)
+
+          expect(payload['data'][:body][:message][:extra]).to be_eql(expected_extra)
+        end
+      end
+
       it 'should include project_gem_paths' do
         notifier.configure do |config|
           config.project_gems = ['rails', 'rspec']
@@ -429,6 +474,23 @@ describe Rollbar do
 
         payload['data'][:server][:root].should == '/path/to/root'
         payload['data'][:server][:branch].should == 'master'
+      end
+
+      context "with Redis instance in payload and ActiveSupport is enabled" do
+        let(:redis) { ::Redis.new }
+        let(:payload) do
+          {
+            :key => {
+              :value => redis
+            }
+          }
+        end
+        it 'dumps to JSON correctly' do
+          redis.set('foo', 'bar')
+          json = notifier.send(:dump_payload, payload)
+
+          expect(json).to be_kind_of(String)
+        end
       end
     end
 
@@ -642,42 +704,6 @@ describe Rollbar do
         body[:message][:extra][:hash].should == {:inner_key => 'inner_value'}
       end
     end
-
-    context 'truncate_payload' do
-      it 'should truncate all nested strings in the payload' do
-        payload = {
-          :truncated => '1234567',
-          :not_truncated => '123456',
-          :hash => {
-            :inner_truncated => '123456789',
-            :inner_not_truncated => '567',
-            :array => ['12345678', '12', {:inner_inner => '123456789'}]
-          }
-        }
-
-        payload_copy = payload.clone
-        notifier.send(:truncate_payload, payload_copy, 6)
-
-        payload_copy[:truncated].should == '123...'
-        payload_copy[:not_truncated].should == '123456'
-        payload_copy[:hash][:inner_truncated].should == '123...'
-        payload_copy[:hash][:inner_not_truncated].should == '567'
-        payload_copy[:hash][:array].should == ['123...', '12', {:inner_inner => '123...'}]
-      end
-
-      it 'should truncate utf8 strings properly' do
-        payload = {
-          :truncated => 'Ŝǻмρļẻ śţяịņģ',
-          :not_truncated => '123456',
-        }
-
-        payload_copy = payload.clone
-        notifier.send(:truncate_payload, payload_copy, 6)
-
-        payload_copy[:truncated].should == "Ŝǻм..."
-        payload_copy[:not_truncated].should == '123456'
-      end
-    end
   end
 
   context 'reporting' do
@@ -750,31 +776,57 @@ describe Rollbar do
       Rollbar.error(exception).should == 'disabled'
     end
 
-    it 'should ignore ignored exception classes' do
-      Rollbar.configure do |config|
-        config.exception_level_filters = { 'NameError' => 'ignore' }
+    context 'using :use_exception_level_filters option as true' do
+      it 'sends the correct filtered level' do
+        Rollbar.configure do |config|
+          config.exception_level_filters = { 'NameError' => 'warning' }
+        end
+
+        Rollbar.error(exception, :use_exception_level_filters => true)
+        expect(Rollbar.last_report[:level]).to be_eql('warning')
       end
 
-      logger_mock.should_not_receive(:info)
-      logger_mock.should_not_receive(:warn)
-      logger_mock.should_not_receive(:error)
+      it 'ignore ignored exception classes' do
+        Rollbar.configure do |config|
+          config.exception_level_filters = { 'NameError' => 'ignore' }
+        end
 
-      Rollbar.error(exception)
+        logger_mock.should_not_receive(:info)
+        logger_mock.should_not_receive(:warn)
+        logger_mock.should_not_receive(:error)
+
+        Rollbar.error(exception, :use_exception_level_filters => true)
+      end
     end
 
-    it 'sends the correct filtered level' do
-      Rollbar.configure do |config|
-        config.exception_level_filters = { 'NameError' => 'warning' }
+    context 'if not using :use_exception_level_filters option' do
+      it 'sends the level defined by the used method' do
+        Rollbar.configure do |config|
+          config.exception_level_filters = { 'NameError' => 'warning' }
+        end
+
+        Rollbar.error(exception)
+        expect(Rollbar.last_report[:level]).to be_eql('error')
       end
 
-      Rollbar.error(exception)
-      expect(Rollbar.last_report[:level]).to be_eql('warning')
+      it 'ignore ignored exception classes' do
+        Rollbar.configure do |config|
+          config.exception_level_filters = { 'NameError' => 'ignore' }
+        end
+
+        Rollbar.error(exception)
+
+        expect(Rollbar.last_report[:level]).to be_eql('error')
+      end
     end
 
-    it "should work with an IO object as rack.errors" do
-      logger_mock.should_receive(:info).with('[Rollbar] Success')
+    # Skip jruby 1.9+ (https://github.com/jruby/jruby/issues/2373)
+    if defined?(RUBY_ENGINE) && RUBY_ENGINE == 'jruby' && (not RUBY_VERSION =~ /^1\.9/)
+      it "should work with an IO object as rack.errors" do
+        logger_mock.should_receive(:info).with('[Rollbar] Success')
 
-      Rollbar.error(exception, :env => { :"rack.errors" => IO.new(2, File::WRONLY) })
+        Rollbar.error(exception, :env => { :"rack.errors" => IO.new(2, File::WRONLY) })
+      end
     end
 
     it 'should ignore ignored persons' do
@@ -832,6 +884,7 @@ describe Rollbar do
     it 'should allow callables to set exception filtered level' do
       callable_mock = double
       saved_filters = Rollbar.configuration.exception_level_filters
+
       Rollbar.configure do |config|
         config.exception_level_filters = { 'NameError' => callable_mock }
       end
@@ -841,7 +894,7 @@ describe Rollbar do
       logger_mock.should_not_receive(:warn)
       logger_mock.should_not_receive(:error)
 
-      Rollbar.error(exception)
+      Rollbar.error(exception, :use_exception_level_filters => true)
     end
 
     it 'should not report exceptions when silenced' do
@@ -872,6 +925,25 @@ describe Rollbar do
       payload["data"][:body][:trace][:frames].should == []
       payload["data"][:body][:trace][:exception][:class].should == "StandardError"
       payload["data"][:body][:trace][:exception][:message].should == "oops"
+    end
+
+    it 'gets the backtrace from the caller' do
+      Rollbar.configure do |config|
+        config.populate_empty_backtraces = true
+      end
+
+      exception = Exception.new
+
+      Rollbar.error(exception)
+
+      gem_dir = Gem::Specification.find_by_name('rollbar').gem_dir
+      gem_lib_dir = gem_dir + '/lib'
+      last_report = Rollbar.last_report
+
+      filepaths = last_report[:body][:trace][:frames].map {|frame| frame[:filename] }.reverse
+
+      expect(filepaths[0]).not_to include(gem_lib_dir)
+      expect(filepaths.any? {|filepath| filepath.include?(gem_dir) }).to be_true
     end
 
     it 'should return the exception data with a uuid, on platforms with SecureRandom' do
@@ -919,7 +991,7 @@ describe Rollbar do
 
     context 'with invalid utf8 encoding' do
       let(:extra) do
-        { :extra => "bad value 1\255" }
+        { :extra => force_to_ascii("bad value 1\255") }
       end
 
       it 'removes te invalid characteres' do
@@ -1150,7 +1222,7 @@ describe Rollbar do
       let(:async_handler) do
         proc do |payload|
           # simulate previous gem version
-          string_payload = MultiJson.dump(payload)
+          string_payload = Rollbar::JSON.dump(payload)
 
           Rollbar.process_payload(string_payload)
         end
@@ -1312,26 +1384,44 @@ describe Rollbar do
   end
 
   context 'enforce_valid_utf8' do
+    # TODO(jon): all these tests should be removed since they are in
+    # in spec/rollbar/encoding/encoder.rb.
+    #
+    # This should just check that in payload with simple values and
+    # nested values are each one passed through Rollbar::Encoding.encode
+    context 'with utf8 string and ruby > 1.8' do
+      next unless String.instance_methods.include?(:force_encoding)
+
+      let(:payload) { { :foo => 'Изменение' } }
+
+      it 'just returns the same string' do
+        payload_copy = payload.clone
+        notifier.send(:enforce_valid_utf8, payload_copy)
+
+        expect(payload_copy[:foo]).to be_eql('Изменение')
+      end
+    end
+
     it 'should replace invalid utf8 values' do
-      bad_key = "inner \x92bad key"
-      bad_key.force_encoding('ASCII-8BIT') if bad_key.respond_to?('force_encoding')
+      bad_key = force_to_ascii("inner \x92bad key")
 
       payload = {
-        :bad_value => "bad value 1\255",
-        :bad_value_2 => "bad\255 value 2",
-        "bad\255 key" => "good value",
+        :bad_value => force_to_ascii("bad value 1\255"),
+        :bad_value_2 => force_to_ascii("bad\255 value 2"),
+        force_to_ascii("bad\255 key") => "good value",
         :hash => {
-          :inner_bad_value => "\255\255bad value 3",
+          :inner_bad_value => force_to_ascii("\255\255bad value 3"),
           bad_key.to_sym => 'inner good value',
-          "bad array key\255" => [
+          force_to_ascii("bad array key\255") => [
             'good array value 1',
-            "bad\255 array value 1\255",
+            force_to_ascii("bad\255 array value 1\255"),
             {
-              :inner_inner_bad => "bad inner \255inner value"
+              :inner_inner_bad => force_to_ascii("bad inner \255inner value")
             }
           ]
         }
       }
+
 
       payload_copy = payload.clone
       notifier.send(:enforce_valid_utf8, payload_copy)
@@ -1485,6 +1575,25 @@ describe Rollbar do
     end
   end
 
+  context 'when reporting internal error with nil context' do
+    let(:context_proc) { proc {} }
+    let(:scoped_notifier) { notifier.scope(:context => context_proc) }
+    let(:exception) { Exception.new }
+    let(:logger_mock) { double("Rails.logger").as_null_object }
+
+    it 'reports successfully' do
+      configure
+
+      Rollbar.configure do |config|
+        config.logger = logger_mock
+      end
+
+      logger_mock.should_receive(:info).with('[Rollbar] Sending payload').once
+      logger_mock.should_receive(:info).with('[Rollbar] Success').once
+      scoped_notifier.send(:report_internal_error, exception)
+    end
+  end
+
   context "request_data_extractor" do
     before(:each) do
       class DummyClass
@@ -1557,12 +1666,83 @@ describe Rollbar do
     end
   end
 
+  describe '.scope!' do
+    let(:new_scope) do
+      { :person => { :id => 1 } }
+    end
+
+    before { reconfigure_notifier }
+
+    it 'adds the new scope to the payload options' do
+      configuration = Rollbar.notifier.configuration
+      Rollbar.scope!(new_scope)
+
+      expect(configuration.payload_options).to be_eql(new_scope)
+    end
+  end
+
   describe '.reset_notifier' do
     it 'resets the notifier' do
       notifier1_id = Rollbar.notifier.object_id
 
       Rollbar.reset_notifier!
       expect(Rollbar.notifier.object_id).not_to be_eql(notifier1_id)
+    end
+  end
+
+  describe '.process_payload' do
+    context 'if there is an exception sending the payload' do
+      let(:exception) { StandardError.new('error message') }
+      let(:payload) { { :foo => :bar } }
+
+      it 'logs the error and the payload' do
+        allow(Rollbar.notifier).to receive(:send_payload).and_raise(exception)
+        expect(Rollbar.notifier).to receive(:log_error)
+
+        expect { Rollbar.notifier.process_payload(payload) }.to raise_error(exception)
+      end
+    end
+  end
+
+  describe '.process_payload_safely' do
+    context 'with errors' do
+      let(:exception) { StandardError.new('the error') }
+
+      it 'doesnt raise anything and sends internal error' do
+        allow(Rollbar.notifier).to receive(:process_payload).and_raise(exception)
+        expect(Rollbar.notifier).to receive(:report_internal_error).with(exception)
+
+        Rollbar.notifier.process_payload_safely({})
+      end
+    end
+  end
+
+  describe '#custom_data' do
+    before do
+      Rollbar.configure do |config|
+        config.custom_data_method = proc { raise 'this-will-raise' } 
+      end
+
+      expect_any_instance_of(Rollbar::Notifier).to receive(:error).and_return(report_data)
+    end
+
+    context 'with uuid in reported data' do
+      next unless defined?(SecureRandom) and SecureRandom.respond_to?(:uuid)
+
+      let(:report_data) { { :uuid => SecureRandom.uuid } }
+      let(:expected_url) { "https://rollbar.com/instance/uuid?uuid=#{report_data[:uuid]}" }
+
+      it 'returns the uuid in :_error_in_custom_data_method' do
+        expect(notifier.custom_data).to be_eql(:_error_in_custom_data_method => expected_url)
+      end
+    end
+
+    context 'without uuid in reported data' do
+      let(:report_data) { { :some => 'other-data' } }
+
+      it 'returns the uuid in :_error_in_custom_data_method' do
+        expect(notifier.custom_data).to be_eql({})
+      end
     end
   end
 

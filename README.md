@@ -1,15 +1,19 @@
-# Rollbar notifier for Ruby [![Build Status](https://api.travis-ci.org/rollbar/rollbar-gem.svg?branch=v1.2.10)](https://travis-ci.org/rollbar/rollbar-gem/branches)
+# Rollbar notifier for Ruby [![Build Status](https://api.travis-ci.org/rollbar/rollbar-gem.svg?branch=v1.5.3)](https://travis-ci.org/rollbar/rollbar-gem/branches)
 
 <!-- RemoveNext -->
-Ruby gem for reporting exceptions, errors, and log messages to [Rollbar](https://rollbar.com).
+[Rollbar](https://rollbar.com) is an error tracking service for Ruby and other languages. The Rollbar service will alert you of problems with your code and help you understand them in a ways never possible before. We love it and we hope you will too.
+
+This is the Ruby library for Rollbar. It will instrument many kinds of Ruby applications automatically at the framework level. You can also make direct calls to send exceptions and messages to Rollbar.
 
 <!-- Sub:[TOC] -->
 
-## Installation
+## Getting Started
 
 Add this line to your application's Gemfile:
 
-    gem 'rollbar', '~> 1.2.10'
+```ruby
+gem 'rollbar', '~> 1.5.3'
+```
 
 And then execute:
 
@@ -30,11 +34,9 @@ $ rails generate rollbar POST_SERVER_ITEM_ACCESS_TOKEN
 <!-- RemoveNextIfProject -->
 Be sure to replace ```POST_SERVER_ITEM_ACCESS_TOKEN``` with your project's ```post_server_item``` access token, which you can find in the Rollbar.com interface.
 
-That's all you need to use Rollbar with Rails.
+That will create the file ```config/initializers/rollbar.rb```, which initializes Rollbar and holds your access token and other configuration values.
 
-That will create the file ```config/initializers/rollbar.rb```, which holds the configuration values (currently just your access token).
-
-If you want to store your access token outside of your repo, run the same command without arguments, and create an environment variable ```ROLLBAR_ACCESS_TOKEN``` that holds your server-side access token:
+If you want to store your access token outside of your repo, run the same command without arguments and create an environment variable ```ROLLBAR_ACCESS_TOKEN``` that holds your server-side access token:
 
 ```bash
 $ rails generate rollbar
@@ -51,9 +53,10 @@ $ heroku config:add ROLLBAR_ACCESS_TOKEN=POST_SERVER_ITEM_ACCESS_TOKEN
 
 That's all you need to use Rollbar with Rails.
 
+
 ### If using Rack
 
-Be sure to initialize Rollbar with your access token somewhere during startup:
+Initialize Rollbar with your access token somewhere during startup:
 
 ```ruby
 Rollbar.configure do |config|
@@ -63,13 +66,12 @@ Rollbar.configure do |config|
 end
 ```
 
-
 <!-- RemoveNextIfProject -->
 Be sure to replace ```POST_SERVER_ITEM_ACCESS_TOKEN``` with your project's ```post_server_item``` access token, which you can find in the Rollbar.com interface.
 
 This monkey patches `Rack::Builder` to work with Rollbar automatically.
 
-For more control, disable the monkey patch in the rollbar configuration:
+For more control, disable the monkey patch:
 
 ```ruby
 Rollbar.configure do |config|
@@ -109,7 +111,7 @@ Uncaught exceptions in Rails controllers will be automatically reported to Rollb
 
 You can use one of `Rollbar.log(level, ...)`, `Rollbar.debug()`, `Rollbar.info()`, `Rollbar.warning()`, `Rollbar.error()` and `Rollbar.critical()` to report exceptions and messages.
 
-The methods take in any number of arguments, but the last exception is used as the reported exception, the last string is used as the message/description, and the last hash is used as the extra data.
+The methods accept any number of arguments. The last exception is used as the reported exception, the last string is used as the message/description, and the last hash is used as the extra data.
 
 For example:
 
@@ -119,13 +121,13 @@ begin
 rescue NoMethodError => e
   # simple exception report (level can be 'debug', 'info', 'warning', 'error' and 'critical')
   Rollbar.log('error', e)
-  
+
   # same functionality as above
   Rollbar.error(e)
-  
+
   # with a description
   Rollbar.error(e, 'The user info hash doesn\'t contain the correct data')
-  
+
   # with extra data giving more insight about the exception
   Rollbar.error(e, :user_info => user_info, :job_id => job_id)
 end
@@ -152,7 +154,7 @@ after_validation :report_validation_errors_to_rollbar
 
 ### Advanced usage
 
-You can use `Rollbar.scope()` to copy a notifier instance and customize the payload data for one-off reporting. The hash argument to `scope()` will be merged into the copied notifier's "payload options", a hash that will be merged into the final payload just before it is reported to Rollbar. 
+You can use `Rollbar.scope()` to copy a notifier instance and customize the payload data for one-off reporting. The hash argument to `scope()` will be merged into the copied notifier's "payload options", a hash that will be merged into the final payload just before it is reported to Rollbar.
 
 For example:
 
@@ -184,7 +186,7 @@ notifier = notifier.scope({
 notifier.info('Jobs processed')
 ```
 
-If you don't want to work with a new `Notifier` instance `#scoped` will do it for you:
+If you don't want to work with a new `Notifier` instance `.scoped` will do it for you:
 
 ```ruby
 while job
@@ -208,6 +210,24 @@ while job
 end
 ```
 
+To modify the current scope (rather than creating a new one), use `Rollbar.scope!`. You can use this to add additional context data from inside a web request, background job, etc.
+
+```ruby
+class NotificationJob
+  include Sidekiq::Worker
+
+  def perform(user_id)
+    Rollbar.scope!(:person => { :id => :user_id })
+
+    # If this next line causes an exception, the reported exception (which will
+    # be reported by Rollbar's standard Sidekiq instrumentation) will also
+    # include the above person information.
+    Notification.send_to_user(user_id)
+  end
+end
+```
+
+
 ## Person tracking
 
 Rollbar will send information about the current user (called a "person" in Rollbar parlance) along with each error report, when available. This works by calling the ```current_user``` controller method. The return value should be an object with an ```id``` method and, optionally, ```username``` and ```email``` methods.
@@ -229,6 +249,57 @@ Rollbar.configure do |config|
   config.person_id_method = "user_id"  # default is "id"
   config.person_username_method = "user_name"  # default is "username"
   config.person_email_method = "email_address"  # default is "email"
+end
+```
+
+### Person tracking with Rack applications
+
+To track information about the current user in non-Rails applications, you can populate the `rollbar.person_data` key in the Rack environment with the desired data. Its value should be a hash like:
+
+```ruby
+{
+  :id => "123",  # required; string up to 40 characters
+  :username => "adalovelace",  # optional; string up to 255 characters
+  :email => "ada@lovelace.net"  # optional; string up to 255 characters
+}
+```
+
+Because Rack applications can vary so widely, we don't provide a default implementation in the gem, but here is an example middleware:
+
+```ruby
+class RollbarPersonData
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    token = Rack::Request.new(env).params['token']
+    user = User.find_by_token(token)
+
+    if user
+      env['rollbar.person_data'] = extract_person_data(user)
+    end
+
+    @app.call(env)
+  end
+
+  def extract_person_data(user)
+    {
+      id: user.id,
+      username: user.username,
+      email: user.email
+    }
+  end
+end
+
+# You can add the middleware to your application, for example:
+
+class App < Sinatra::Base
+  use Rollbar::Middleware::Sinatra
+  use RollbarPersonData
+
+  # ...
+  # ...
 end
 ```
 
@@ -284,6 +355,8 @@ config.custom_data_method = lambda {
 
 This data will appear in the Occurrences tab and on the Occurrence Detail pages in the Rollbar interface.
 
+If your `custom_data_method` crashes while reporting an error, Rollbar will report that new error and will attach its uuid URL to the parent error report.
+
 ## Exception level filters
 
 By default, all uncaught exceptions are reported at the "error" level, except for the following, which are reported at "warning" level:
@@ -294,6 +367,12 @@ By default, all uncaught exceptions are reported at the "error" level, except fo
 
 If you'd like to customize this list, see the example code in ```config/initializers/rollbar.rb```. Supported levels: "critical", "error", "warning", "info", "debug", "ignore". Set to "ignore" to cause the exception not to be reported at all.
 
+This behavior applies to uncaught exceptions, not direct calls to `Rollbar.error()`, `Rollbar.warning()`, etc. If you are making a direct call to one of the log methods and want exception level filters to apply, pass an extra keyword argument:
+
+```ruby
+Rollbar.error(exception, :use_exception_level_filters => true)
+```
+
 ## Silencing exceptions at runtime
 
 If you just want to disable exception reporting for a single block, use ```Rollbar.silenced```:
@@ -302,6 +381,23 @@ If you just want to disable exception reporting for a single block, use ```Rollb
 Rollbar.silenced {
   foo = bar  # will not be reported
 }
+```
+
+# Sending backtrace without rescued exceptions
+
+If you use the gem in this way:
+
+```ruby
+exception = MyException.new('this is a message')
+Rollbar.error(exception)
+```
+
+You will notice a backtrace doesn't appear in your Rollbar dashboard. This is because `exception.backtrace` is `nil` in these cases. We can send the current backtrace for you even your exception doesn't have it. In order to enable this feature you should configure Rollbar in this way:
+
+```ruby
+Rollbar.configure do |config|
+  config.populate_empty_backtraces = true
+end
 ```
 
 ## Delayed::Job integration
@@ -408,13 +504,13 @@ config.use_thread
 You can supply your own handler using ```config.async_handler```. The object to set for `async_handler` should respond to `#call` and receive the payload. The handler should schedule the payload for later processing (i.e. with a delayed_job, in a resque queue, etc.) and should itself return immediately. For example:
 
 ```ruby
-config.use_async
+config.use_async = true
 config.async_handler = Proc.new { |payload|
-  Thread.new { Rollbar.process_payload(payload) }
+  Thread.new { Rollbar.process_payload_safely(payload) }
 }
 ```
 
-Make sure you pass ```payload``` to ```Rollbar.process_payload``` in your own implementation.
+Make sure you pass ```payload``` to ```Rollbar.process_payload_safely``` in your own implementation.
 
 ## Failover handlers
 
@@ -443,6 +539,39 @@ config.filepath = '/path/to/file.rollbar' #should end in '.rollbar' for use with
 
 For this to work, you'll also need to set up rollbar-agent--see its docs for details.
 
+## Rails booting process
+
+Rails doesn't provide a way to hook into its booting process, so we can't catch errors during boot out of the box. To report these errors to Rollbar, make the following changes to your project files.
+
+First, move your `config/initializers/rollbar.rb` file to `config/rollbar.rb`. Then be sure your `config/environment.rb` looks similar to this:
+
+```ruby
+# config/environment.rb
+
+require File.expand_path('../application', __FILE__)
+require File.expand_path('../rollbar', __FILE__)
+
+begin
+  Rails.application.initialize!
+rescue Exception => e
+  Rollbar.error(e)
+  raise
+end
+```
+
+How this works: first, Rollbar config (which is now at `config/rollbar.rb` is required). Later, `Rails.application/initialize` statement is wrapped with a `begin/rescue` and any exceptions within will be reported to Rollbar.
+
+## Rails runner command
+
+We aren't able to instrument `rails runner` directly, but we do provide a wrapper, `rollbar-rails-runner`, which you can use to capture errors when running commands in a `rails runner`-like way. For example:
+
+```shell
+$ bundle exec rollbar-rails-runner 'puts User.count'
+45
+```
+
+If an error occurs during that command, the exception will be reported to Rollbar.
+
 ## Deploy Tracking with Capistrano
 
 ### Capistrano 3
@@ -460,6 +589,8 @@ set :rollbar_token, 'POST_SERVER_ITEM_ACCESS_TOKEN'
 set :rollbar_env, Proc.new { fetch :stage }
 set :rollbar_role, Proc.new { :app }
 ```
+
+NOTE: We've seen problems with Capistrano version `3.0.x` where the revision reported is incorrect. Version `3.1.0` and higher works correctly.
 
 ### Capistrano 2
 
@@ -521,7 +652,7 @@ Some users have reported problems with Zeus when ```rake``` was not explicitly i
 
 You can find upgrading notes in [UPGRADING.md](UPGRADING.md).
 
-## Issues
+## Known Issues
 
 We've received some issues from users having problems when they use [Oj](https://github.com/ohler55/oj) as the JSON serialization library with [MultiJson](https://github.com/intridea/multi_json). To avoid these problems, we recommend upgrading to Oj version 2.11.0:
 

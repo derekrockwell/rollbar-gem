@@ -1,5 +1,140 @@
 # Change Log
 
+## 1.5.3
+
+Bug fixes:
+
+- Run `rollbar-rails-runner` in the context of `Rails` module so we avoid namespace conflicts. See [#242](https://github.com/rollbar/rollbar-gem/pull/242)
+
+## 1.5.2
+
+Bug fixes:
+
+- Fix minimum body truncation strategy when the payload is a message without exception. See [#240](https://github.com/rollbar/rollbar-gem/pull/240)
+
+## 1.5.1
+
+Bug fixes:
+
+- Fixed crashes when `Configuration#custom_data_method` fails. Now a report for that crash will be reported also. See [#235](https://github.com/rollbar/rollbar-gem/pull/235)
+
+## 1.5.0
+
+Bug fixes:
+
+- Fixed support for extended unicode characters. See [#234](https://github.com/rollbar/rollbar-gem/pull/234)
+
+Possible breaking changes:
+
+- Some characters that previously were stripped are now encoded. This could cause some events to be grouped into new items by Rollbar.
+
+
+## 1.4.5
+
+Bug fixes:
+
+- Fixed internal error reporting IpSpoofAttackErrors. See [#233](https://github.com/rollbar/rollbar-gem/pull/233)
+- Removed duplicated `schedule_payload` definition. See [#231](https://github.com/rollbar/rollbar-gem/pull/231)
+
+
+## 1.4.4
+
+New features:
+
+- Added configuration option to gather backtraces for exceptions that don't already have one (i.e. if you do `Rollbar.error(Exception.new)`). Set `config.populate_empty_backtraces = true` to enable it. See [#206](https://github.com/rollbar/rollbar-gem/pull/206)
+
+Bug fixes:
+
+- Reverted capistrano change as it causes problems in some setups. See [#210](https://github.com/rollbar/rollbar-gem/pull/210)
+
+Other:
+
+- Refactored the Sidekiq handler (no changes to the interface). See [#197](https://github.com/rollbar/rollbar-gem/pull/197)
+
+## 1.4.3
+
+New features:
+
+- The current thread's scope can now be modified using `Rollbar.scope!`. This can be used to provide context data which will be included if the current request/job/etc. later throws an exception. See [#212](https://github.com/rollbar/rollbar-gem/pull/212)
+
+Bug fixes:
+
+- Remove duplicate `#configure` definition. See [#207](https://github.com/rollbar/rollbar-gem/pull/207)
+- In the capistrano task, don't override set variables. See [#210](https://github.com/rollbar/rollbar-gem/pull/210)
+- Style fix in sidekiq handler. See [#209](https://github.com/rollbar/rollbar-gem/pull/209)
+
+## 1.4.2
+
+Bug fixes:
+
+- Fix null 'context' in internal error reports. See [#208](https://github.com/rollbar/rollbar-gem/pull/208)
+
+## 1.4.1
+
+Bug fixes:
+
+- Fix internal error when ActiveRecord was present, but not used. See [#204](https://github.com/rollbar/rollbar-gem/pull/204)
+
+## 1.4.0
+
+Possible breaking changes:
+
+- `exception_level_filters` is now applied only to "uncaught" errors (i.e. those detected by middlewares) but not to direct calls to `Rollbar.error`. If you were previously using `Rollbar.error` (or `Rollbar.warning`, etc.), the new behavior is *probably* desirable, but if it isn't, you can get the old behavior via `Rollbar.error(e, :use_exception_level_filters => true)`. The middlewares that ship with the gem also now pass this new flag.
+
+## 1.3.2
+
+Bug fixes:
+
+- Fix bug with the `write_to_file` method where values were dumped as ruby hashes instead of json. See [#198](https://github.com/rollbar/rollbar-gem/pull/198)
+
+## 1.3.1
+
+Bug fixes:
+
+- Fix bug with smart truncation for messages. See [#195](https://github.com/rollbar/rollbar-gem/issues/195) and [#196](https://github.com/rollbar/rollbar-gem/issues/196)
+- Safely catch exceptions in `process_payload` when called from an async handler. See [#196](https://github.com/rollbar/rollbar-gem/pull/196)
+
+
+## 1.3.0
+
+Performance improvements:
+
+- In the Rails, Rack, and Sinatra middlewares, request data is now gathered only when needed instead of in advance on every request. See [#194](https://github.com/rollbar/rollbar-gem/pull/194); fixes [#180](https://github.com/rollbar/rollbar-gem/issues/180)
+
+Possible breaking changes:
+
+- If the scope's `:request` or `:context` value is an object that responds to `:call`, those values will now be called when a a report is made (and their result will be used in the payload). This is very unlikely to affect anyone, but we're releasing this as a version bump just to be safe.
+
+
+## 1.2.13
+
+New features:
+
+- Person tracking for Rack/Sinatra apps. See [#192](https://github.com/rollbar/rollbar-gem/pull/192)
+
+Bug fixes:
+
+- Fix `rollbar:test` rake task (regression from 1.2.12); see [985c091](https://github.com/vyrak/rollbar-gem/commit/985c091ad58ae4f4c6997dd356497b4e5a2be498)
+
+## 1.2.12
+
+Bug fixes:
+
+- Fix bug introduced in 1.2.11 that broke the sidekiq async handler. See [#190](https://github.com/rollbar/rollbar-gem/issues/190)
+- Skip Rake monkeypatch for Rake < 0.9.0. Fixes [#187](https://github.com/rollbar/rollbar-gem/issues/187)
+
+
+## 1.2.11
+
+New features:
+
+- Improved truncation algorithm, so that more kinds of large payloads will be successfully brought below the 128kb limit and successfully reported. See [#185](https://github.com/rollbar/rollbar-gem/pull/185)
+
+Bug fixes:
+
+- Fix issue where using Rollbar outside of a web process was prone to errors being silently ignored. See [#183](https://github.com/rollbar/rollbar-gem/issues/183)
+
+
 ## 1.2.10
 
 Bug fixes:

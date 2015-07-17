@@ -10,12 +10,19 @@ namespace :dummy do
   load 'spec/dummyapp/Rakefile'
 end
 
+if ENV['TRAVIS_JDK_VERSION'] == 'oraclejdk7'
+  require 'rollbar/configuration'
+  Rollbar::Configuration::DEFAULT_ENDPOINT = 'https://api-alt.rollbar.com/api/1/item/'
+end
+
 Rake::Task['dummy:db:setup'].invoke
 
 Dir["#{File.dirname(__FILE__)}/support/**/*.rb"].each { |f| require f }
 
 RSpec.configure do |config|
   config.include(NotifierHelpers)
+  config.include(FixtureHelpers)
+  config.include(EncodingHelpers)
 
   config.color_enabled = true
   config.formatter = 'documentation'
@@ -38,7 +45,7 @@ RSpec.configure do |config|
   end
   config.backtrace_exclusion_patterns = [/gems\/rspec-.*/]
 
-  if ENV['SKIP_DUMMY_ROLLBAR']
+  if ENV['SKIP_DUMMY_ROLLBAR'] == 'true'
     config.filter_run(:skip_dummy_rollbar => true)
   else
     config.filter_run_excluding(:skip_dummy_rollbar => true)
@@ -48,3 +55,4 @@ end
 def local?
   ENV['LOCAL'] == '1'
 end
+
